@@ -27,9 +27,9 @@ struct KOReaderPosition {
  * CrossPoint tracks position as (spineIndex, pageNumber).
  * KOReader uses XPath-like strings + percentage.
  *
- * Since CrossPoint discards HTML structure during parsing, we generate
- * synthetic XPath strings based on spine index, using percentage as the
- * primary sync mechanism.
+ * CrossPoint first tries to extract an element-level XPath by reparsing the
+ * current spine XHTML and mapping intra-spine progress to text anchors.
+ * If extraction fails, it falls back to a synthetic chapter-level XPath.
  */
 class ProgressMapper {
  public:
@@ -60,8 +60,7 @@ class ProgressMapper {
  private:
   /**
    * Generate XPath for KOReader compatibility.
-   * Format: /body/DocFragment[spineIndex+1]/body
-   * Since CrossPoint doesn't preserve HTML structure, we rely on percentage for positioning.
+   * Fallback format: /body/DocFragment[spineIndex]/body
    */
   static std::string generateXPath(int spineIndex, int pageNumber, int totalPages);
 };
