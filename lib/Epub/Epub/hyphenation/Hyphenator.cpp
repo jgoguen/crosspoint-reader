@@ -197,10 +197,8 @@ std::vector<Hyphenator::BreakInfo> Hyphenator::breakOffsets(const std::string& w
     std::vector<BreakInfo> segmentedBreaks;
     appendSegmentPatternBreaks(cps, *hyphenator, includeFallback, segmentedBreaks);
     appendApostropheContractionBreaks(cps, segmentedBreaks);
-    if (!segmentedBreaks.empty()) {
-      sortAndDedupeBreakInfos(segmentedBreaks);
-      return segmentedBreaks;
-    }
+    sortAndDedupeBreakInfos(segmentedBreaks);
+    return segmentedBreaks;
   }
 
   // Ask language hyphenator for legal break points.
