@@ -142,8 +142,10 @@ bool RecentBooksStore::loadFromBinaryFile() {
           inputFile.close();
           return false;
         }
-        tmpRecentBooks.push_back({path, title, author, "", ""});
-      } else {
+        if (!title.empty()) {
+          tmpRecentBooks.push_back({path, title, author, "", ""});
+        }
+      } else if (!book.title.empty()) {
         tmpRecentBooks.push_back(book);
       }
     }

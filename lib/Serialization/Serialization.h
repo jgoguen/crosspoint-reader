@@ -54,7 +54,9 @@ static bool readString(FsFile& file, std::string& s) {
   uint32_t len;
   readPod(file, len);
   if (len > MAX_STRING_LENGTH) {
-    file.seekCur(len);  // skip payload to keep file position aligned
+    if (!file.seekCur(static_cast<int64_t>(len))) {  // skip payload to keep file position aligned
+      return false;
+    }
     return false;
   }
   s.resize(len);
