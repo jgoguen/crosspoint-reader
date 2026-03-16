@@ -955,6 +955,6 @@ if __name__ == "__main__":
 else:
     try:
         Import("env")
-        main()
+        main(strip_unused=True)
     except NameError:
         pass
