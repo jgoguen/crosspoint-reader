@@ -5,6 +5,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 
@@ -37,7 +38,11 @@ void drawBatteryIcon(const GfxRenderer& renderer, int x, int y, int battWidth, i
   const bool charging = gpio.isUsbConnected();
 
   // The +1 is to round up, so that we always fill at least one pixel
-  constexpr int maxFillWidth = battWidth - 5;
+  const int maxFillWidth = battWidth - 5;
+  const int fillHeight = rectHeight - 4;
+  if (maxFillWidth <= 0 || fillHeight <= 0) {
+    return;
+  }
   int filledWidth = percentage * maxFillWidth / 100 + 1;
   if (filledWidth > maxFillWidth) {
     filledWidth = maxFillWidth;
@@ -46,10 +51,10 @@ void drawBatteryIcon(const GfxRenderer& renderer, int x, int y, int battWidth, i
   // When charging, ensure minimum fill so lightning bolt is fully visible
   constexpr int minFillForBolt = 8;
   if (charging && filledWidth < minFillForBolt) {
-    filledWidth = minFillForBolt;
+    filledWidth = std::min(minFillForBolt, maxFillWidth);
   }
 
-  renderer.fillRect(x + 2, y + 2, filledWidth, rectHeight - 4);
+  renderer.fillRect(x + 2, y + 2, filledWidth, fillHeight);
 
   // Draw lightning bolt when charging (white/inverted on black fill for visibility)
   if (charging) {
