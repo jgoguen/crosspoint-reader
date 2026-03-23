@@ -971,9 +971,13 @@ bool ChapterHtmlSlimParser::parseAndBuildPages() {
     return false;
   }
 
-  // Get file size to decide whether to show indexing popup.
-  if (popupFn && file.size() >= MIN_SIZE_FOR_POPUP) {
-    popupFn();
+  const size_t totalFileSize = file.size();
+  size_t bytesRead = 0;
+  int lastReportedProgress = -1;
+
+  // Show initial progress popup for files above threshold.
+  if (progressFn && totalFileSize >= MIN_SIZE_FOR_POPUP) {
+    progressFn(0);
   }
 
   XML_SetUserData(parser, this);
@@ -995,6 +999,16 @@ bool ChapterHtmlSlimParser::parseAndBuildPages() {
     }
 
     const size_t len = file.read(buf, PARSE_BUFFER_SIZE);
+    bytesRead += len;
+
+    // Report progress in 5% increments to limit e-ink refreshes.
+    if (progressFn && totalFileSize >= MIN_SIZE_FOR_POPUP) {
+      const int progress = static_cast<int>(bytesRead * 100 / totalFileSize);
+      if (progress / 5 > lastReportedProgress / 5) {
+        lastReportedProgress = progress;
+        progressFn(progress);
+      }
+    }
 
     if (len == 0 && file.available() > 0) {
       LOG_ERR("EHP", "File read error");
