@@ -4851,11 +4851,11 @@
                 let batchOffset = 0;
 
                 while (batchOffset < batchBuf.byteLength && ws.readyState === WebSocket.OPEN) {
-                  // Backpressure: yield once when the send buffer is full.
-                  // A single zero-delay yield lets the browser flush the
-                  // WebSocket buffer without the ~4ms minimum of setTimeout.
-                  if (ws.bufferedAmount > WS_CHUNK_SIZE * 4) {
-                    await new Promise(r => setTimeout(r, 0));
+                  // Backpressure: yield when the send buffer builds up.
+                  // Keeps the ESP32 from being overwhelmed while avoiding
+                  // the ~4ms minimum of higher setTimeout values.
+                  if (ws.bufferedAmount > WS_CHUNK_SIZE * 2) {
+                    await new Promise(r => setTimeout(r, 1));
                   }
 
                   if (ws.readyState !== WebSocket.OPEN) {
@@ -4870,12 +4870,15 @@
                 offset = batchEnd;
 
                 if (onProgress) {
-                  onProgress(offset, totalSize);
+                  // Cap at 99% — 100% is shown only when server confirms DONE
+                  const reported = Math.min(offset, Math.floor(totalSize * 0.99));
+                  onProgress(reported, totalSize);
                 }
               }
 
               sendingChunks = false;
               console.log('[WS] All chunks sent, waiting for DONE');
+              if (onProgress) onProgress(totalSize, totalSize, 'saving');
             } catch (err) {
               console.error('[WS] Error sending chunks:', err);
               sendingChunks = false;
@@ -5076,20 +5079,24 @@
         console.log(`[Upload] ${file.name} via ${uploadMethod}`);
 
         let uploadStartTime = 0;
-        const onProgress = (loaded, total) => {
+        const onProgress = (loaded, total, state) => {
           if (!uploadStartTime) uploadStartTime = Date.now();
           const uploadPercent = Math.round((loaded / total) * 100);
           // If conversion succeeded, display goes from 50-100%, otherwise 0-100%
           const displayPercent = conversionSucceeded ? 50 + Math.round(uploadPercent / 2) : uploadPercent;
           progressFill.style.width = displayPercent + '%';
-          const prefix = conversionSucceeded ? 'Converting & uploading' : 'Uploading';
           let speedText = '';
           const elapsed = (Date.now() - uploadStartTime) / 1000;
           if (elapsed > 0.5 && loaded > 0) {
             const kbps = (loaded / 1024) / elapsed;
             speedText = kbps >= 1024 ? ` — ${(kbps / 1024).toFixed(1)} MB/s` : ` — ${Math.round(kbps)} KB/s`;
           }
-          progressText.textContent = `${prefix} ${file.name} (${currentIndex + 1}/${files.length}) — ${uploadPercent}%${speedText}`;
+          if (state === 'saving') {
+            progressText.textContent = `Saving ${file.name} (${currentIndex + 1}/${files.length})...${speedText}`;
+          } else {
+            const prefix = conversionSucceeded ? 'Converting & uploading' : 'Uploading';
+            progressText.textContent = `${prefix} ${file.name} (${currentIndex + 1}/${files.length}) — ${uploadPercent}%${speedText}`;
+          }
         };
 
         const onComplete = () => {
