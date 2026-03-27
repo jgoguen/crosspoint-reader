@@ -7,12 +7,10 @@
 #include <PngToBmpConverter.h>
 #include <ZipFile.h>
 
-#include "CrossPointSettings.h"
 #include "Epub/parsers/ContainerParser.h"
 #include "Epub/parsers/ContentOpfParser.h"
 #include "Epub/parsers/TocNavParser.h"
 #include "Epub/parsers/TocNcxParser.h"
-
 
 bool Epub::findContentOpfFile(std::string* contentOpfFile) const {
   const auto containerPath = "META-INF/container.xml";
@@ -770,7 +768,7 @@ BookMetadataCache::TocEntry Epub::getTocItem(const int tocIndex) const {
     return {};
   }
 
-  if (SETTINGS.syntheticTocFallback && !hasReliableToc()) {
+  if (syntheticTocFallbackEnabled && !hasReliableToc()) {
     const int spineCount = bookMetadataCache->getSpineCount();
     if (tocIndex < 0 || tocIndex >= spineCount) {
       LOG_DBG("EBP", "getTocItem synthetic index:%d is out of range", tocIndex);
@@ -795,7 +793,7 @@ int Epub::getTocItemsCount() const {
     return 0;
   }
 
-  if (SETTINGS.syntheticTocFallback && !hasReliableToc()) {
+  if (syntheticTocFallbackEnabled && !hasReliableToc()) {
     return bookMetadataCache->getSpineCount();
   }
 
@@ -809,7 +807,7 @@ int Epub::getSpineIndexForTocIndex(const int tocIndex) const {
     return 0;
   }
 
-  if (SETTINGS.syntheticTocFallback && !hasReliableToc()) {
+  if (syntheticTocFallbackEnabled && !hasReliableToc()) {
     if (tocIndex < 0 || tocIndex >= bookMetadataCache->getSpineCount()) {
       LOG_ERR("EBP", "getSpineIndexForTocIndex synthetic tocIndex %d out of range", tocIndex);
       return 0;
@@ -885,7 +883,7 @@ int Epub::getTocIndexForSpineIndex(const int spineIndex) const {
     return 0;
   }
 
-  if (SETTINGS.syntheticTocFallback && !hasReliableToc()) {
+  if (syntheticTocFallbackEnabled && !hasReliableToc()) {
     return spineIndex;
   }
 
