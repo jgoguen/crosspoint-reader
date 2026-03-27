@@ -875,12 +875,12 @@ bool Epub::hasReliableToc() const {
 int Epub::getTocIndexForSpineIndex(const int spineIndex) const {
   if (!bookMetadataCache || !bookMetadataCache->isLoaded()) {
     LOG_ERR("EBP", "getTocIndexForSpineIndex called but cache not loaded");
-    return 0;
+    return -1;
   }
 
   if (spineIndex < 0 || spineIndex >= bookMetadataCache->getSpineCount()) {
     LOG_ERR("EBP", "getTocIndexForSpineIndex: spineIndex %d out of range", spineIndex);
-    return 0;
+    return -1;
   }
 
   if (syntheticTocFallbackEnabled && !hasReliableToc()) {
