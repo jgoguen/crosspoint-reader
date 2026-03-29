@@ -1216,7 +1216,7 @@ const char* const STRINGS_EN[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_ES[] = {
@@ -1751,7 +1751,7 @@ const char* const STRINGS_ES[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_FR[] = {
@@ -2390,7 +2390,7 @@ const char* const STRINGS_FR[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_DE[] = {
@@ -2837,7 +2837,7 @@ const char* const STRINGS_DE[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_CS[] = {
@@ -4201,7 +4201,7 @@ const char* const STRINGS_CS[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_PO[] = {
@@ -4770,7 +4770,7 @@ const char* const STRINGS_PO[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_RU[] = {
@@ -11995,7 +11995,7 @@ const char* const STRINGS_RU[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_SV[] = {
@@ -12723,7 +12723,7 @@ const char* const STRINGS_SV[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_RO[] = {
@@ -13580,7 +13580,7 @@ const char* const STRINGS_RO[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_CA[] = {
@@ -14167,7 +14167,7 @@ const char* const STRINGS_CA[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_UK[] = {
@@ -22406,7 +22406,7 @@ const char* const STRINGS_UK[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_BE[] = {
@@ -29319,7 +29319,7 @@ const char* const STRINGS_BE[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_IT[] = {
@@ -29660,7 +29660,7 @@ const char* const STRINGS_IT[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_PL[] = {
@@ -30539,7 +30539,7 @@ const char* const STRINGS_PL[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_FI[] = {
@@ -31236,7 +31236,7 @@ const char* const STRINGS_FI[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_DA[] = {
@@ -31731,7 +31731,7 @@ const char* const STRINGS_DA[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_NL[] = {
@@ -32042,7 +32042,7 @@ const char* const STRINGS_NL[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_TR[] = {
@@ -33229,7 +33229,7 @@ const char* const STRINGS_TR[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 const char* const STRINGS_KK[] = {
@@ -40948,7 +40948,7 @@ const char* const STRINGS_KK[] = {
     "Off",
     "Reading progress: Page %lu/%u - %.0f%%",
     "Reading progress: Page %lu",
-    " - Page %d/%d - %.0f%%",
+    " - Page %d/%d - %.0f%% read",
 };
 
 }  // namespace i18n_strings
