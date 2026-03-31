@@ -554,6 +554,12 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     }
   }
 
+  // Track ul/ol nesting so li markers can be numbered or bulleted accordingly
+  if (strcmp(name, "ul") == 0 || strcmp(name, "ol") == 0) {
+    self->listStack.push_back({self->depth, strcmp(name, "ol") == 0, 0});
+    // fall through to depth increment
+  }
+
   const float emSize = static_cast<float>(self->renderer.getFontAscenderSize(self->fontId));
   const auto userAlignmentBlockStyle = BlockStyle::fromCssStyle(
       cssStyle, emSize, static_cast<CssTextAlign>(self->paragraphAlignment), self->viewportWidth);
@@ -581,7 +587,14 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       self->updateEffectiveInlineStyle();
 
       if (strcmp(name, "li") == 0) {
-        self->currentTextBlock->addWord("\xe2\x80\xa2", EpdFontFamily::REGULAR);
+        char marker[12];
+        if (!self->listStack.empty() && self->listStack.back().isOrdered) {
+          self->listStack.back().counter += 1;
+          snprintf(marker, sizeof(marker), "%d.", self->listStack.back().counter);
+        } else {
+          strncpy(marker, "\xe2\x80\xa2", sizeof(marker));
+        }
+        self->currentTextBlock->addWord(marker, EpdFontFamily::REGULAR);
       }
     }
   } else if (matches(name, UNDERLINE_TAGS, NUM_UNDERLINE_TAGS)) {
@@ -892,6 +905,11 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
   }
 
   self->depth -= 1;
+
+  // Pop list entries whose ul/ol is now out of scope
+  while (!self->listStack.empty() && self->listStack.back().depth >= self->depth) {
+    self->listStack.pop_back();
+  }
 
   // Closing a footnote link — create entry from collected text and href
   if (self->insideFootnoteLink && self->depth == self->footnoteLinkDepth) {
