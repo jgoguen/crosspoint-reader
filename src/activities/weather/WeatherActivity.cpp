@@ -9,7 +9,6 @@
 #include <WiFi.h>
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -29,79 +28,18 @@ inline bool getBitmapBit(const uint8_t* bitmap, const int size, const int x, con
   return (bitmap[idx] & mask) != 0;
 }
 
-inline void setBitmapBit(uint8_t* bitmap, const int size, const int x, const int y, const bool value) {
-  const int rowBytes = size / 8;
-  const int idx = y * rowBytes + (x / 8);
-  const uint8_t mask = static_cast<uint8_t>(0x80 >> (x % 8));
-  if (value) {
-    bitmap[idx] |= mask;
-  } else {
-    bitmap[idx] &= static_cast<uint8_t>(~mask);
-  }
-}
-
 void drawWeatherIconWithOrientation(const GfxRenderer& renderer, const uint8_t* icon, const int x, const int y,
                                     const int size) {
-  // Weather activity uses LandscapeClockwise; rotate icon pixels 90deg so
-  // directional glyphs align with the landscape-oriented UI.
-  if (renderer.getOrientation() != GfxRenderer::Orientation::LandscapeClockwise) {
-    renderer.drawImage(icon, x, y, size, size);
-    return;
-  }
-
-  constexpr int kLargeIconBytes = (WEATHER_ICON_LARGE * WEATHER_ICON_LARGE) / 8;
-  std::array<uint8_t, kLargeIconBytes> rotatedRaw{};
-  rotatedRaw.fill(0xFF);
-
   for (int srcY = 0; srcY < size; srcY++) {
     for (int srcX = 0; srcX < size; srcX++) {
-      // 90deg counter-clockwise: (x, y) -> (y, size - 1 - x)
-      const int dstX = srcY;
-      const int dstY = size - 1 - srcX;
-      setBitmapBit(rotatedRaw.data(), size, dstX, dstY, getBitmapBit(icon, size, srcX, srcY));
-    }
-  }
-
-  // Re-center rotated icon by its painted-pixel bounds to avoid asymmetric
-  // source padding appearing as left-side clipping after rotation.
-  int minX = size, minY = size, maxX = -1, maxY = -1;
-  for (int py = 0; py < size; py++) {
-    for (int px = 0; px < size; px++) {
-      if (!getBitmapBit(rotatedRaw.data(), size, px, py)) {
-        minX = std::min(minX, px);
-        minY = std::min(minY, py);
-        maxX = std::max(maxX, px);
-        maxY = std::max(maxY, py);
-      }
-    }
-  }
-
-  if (maxX < minX || maxY < minY) {
-    renderer.drawImage(rotatedRaw.data(), x, y, size, size);
-    return;
-  }
-
-  const int bboxW = maxX - minX + 1;
-  const int bboxH = maxY - minY + 1;
-  const int targetMinX = (size - bboxW) / 2;
-  const int targetMinY = (size - bboxH) / 2;
-  const int shiftX = targetMinX - minX;
-  const int shiftY = targetMinY - minY;
-
-  std::array<uint8_t, kLargeIconBytes> rotatedCentered{};
-  rotatedCentered.fill(0xFF);
-  for (int py = 0; py < size; py++) {
-    for (int px = 0; px < size; px++) {
-      const int dstX = px + shiftX;
-      const int dstY = py + shiftY;
-      if (dstX < 0 || dstX >= size || dstY < 0 || dstY >= size) {
+      // 0 bits are black (drawn) in these icon bitmaps.
+      if (getBitmapBit(icon, size, srcX, srcY)) {
         continue;
       }
-      setBitmapBit(rotatedCentered.data(), size, dstX, dstY, getBitmapBit(rotatedRaw.data(), size, px, py));
+
+      renderer.drawPixel(x + srcX, y + srcY);
     }
   }
-
-  renderer.drawImage(rotatedCentered.data(), x, y, size, size);
 }
 
 StrId getWeatherDescriptionStrId(const int wmoCode) {
@@ -193,6 +131,8 @@ void WeatherActivity::onExit() {
 }
 
 void WeatherActivity::loadAndDisplay() {
+  constexpr long CACHE_REFRESH_AGE_SECONDS = 30L * 60L;
+
   if (!WEATHER_SETTINGS.hasLocation()) {
     state = State::ERROR;
     errorMessage = tr(STR_WEATHER_NO_LOCATION);
@@ -203,23 +143,23 @@ void WeatherActivity::loadAndDisplay() {
   // Try cache first
   WeatherData cached = WeatherClient::getWeather(WEATHER_SETTINGS, forceRefresh);
   if (cached.valid) {
-    const bool shouldRefresh = forceRefresh;
-    if (!shouldRefresh) {
-      const time_t now = time(nullptr);
-      const long age = (cached.fetchedAt > 0) ? static_cast<long>(now - cached.fetchedAt) : -1;
-      if (age >= 0 && age > 30L * 60L) {
-        LOG_DBG("WEA", "Displayed stale cache (age=%ld s); scheduling refresh", age);
-      } else {
-        LOG_DBG("WEA", "Displayed cache (age=%ld s)", age);
-      }
+    const time_t now = time(nullptr);
+    const long age = (cached.fetchedAt > 0) ? static_cast<long>(now - cached.fetchedAt) : -1;
+    const bool cacheIsStale = (age >= 0 && age > CACHE_REFRESH_AGE_SECONDS) || age < 0;
+    const bool shouldBackgroundRefresh = forceRefresh || cacheIsStale;
+
+    if (cacheIsStale) {
+      LOG_DBG("WEA", "Displayed stale cache (age=%ld s); scheduling refresh", age);
+    } else {
+      LOG_DBG("WEA", "Displayed fresh cache (age=%ld s); skip auto-refresh", age);
     }
 
     weatherData = std::move(cached);
     state = State::WEATHER_DISPLAY;
     requestUpdate();
 
-    // After first paint, refresh stale/non-forced data via WiFi-gated path.
-    if (!forceRefresh) {
+    // Refresh only when forced or when cache is stale.
+    if (shouldBackgroundRefresh) {
       checkAndConnectWifi();
     }
     return;
@@ -300,6 +240,7 @@ void WeatherActivity::loop() {
   if (state == State::ERROR) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       // Open weather settings (useful when no location is configured)
+      renderer.setOrientation(GfxRenderer::Orientation::Portrait);
       startActivityForResult(std::make_unique<WeatherSettingsActivity>(renderer, mappedInput),
                              [this](const ActivityResult&) {
                                renderer.setOrientation(GfxRenderer::Orientation::LandscapeClockwise);
@@ -359,6 +300,7 @@ void WeatherActivity::loop() {
     onGoHome();
   } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     // Open weather settings
+    renderer.setOrientation(GfxRenderer::Orientation::Portrait);
     startActivityForResult(std::make_unique<WeatherSettingsActivity>(renderer, mappedInput),
                            [this](const ActivityResult&) {
                              // Re-apply landscape after returning from settings
