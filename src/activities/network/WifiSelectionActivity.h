@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include <WiFi.h>
+
 #include "activities/Activity.h"
 #include "util/ButtonNavigator.h"
 
@@ -87,6 +89,7 @@ class WifiSelectionActivity final : public Activity {
   static constexpr unsigned long CONNECTION_TIMEOUT_MS = 15000;
   static constexpr unsigned long AUTO_CYCLE_TIMEOUT_MS = 5000;
   unsigned long connectionStartTime = 0;
+  wl_status_t lastLoggedWifiStatus = WL_IDLE_STATUS;
 
   void renderNetworkList() const;
   void renderPasswordEntry() const;
