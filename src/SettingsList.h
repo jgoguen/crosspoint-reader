@@ -226,8 +226,11 @@ inline const std::vector<SettingInfo> list = {
 
     // --- System ---
     SettingInfo::Toggle(StrId::STR_SHOW_HIDDEN_FILES, &CrossPointSettings::showHiddenFiles, "showHiddenFiles",
-                        StrId::STR_CAT_SYSTEM),
+                        StrId::STR_CAT_SYSTEM)
+        .withSubcategory(StrId::STR_MENU_SYS_SYSTEM),
     SettingInfo::Toggle(StrId::STR_SHOW_FILE_EXTENSIONS, &CrossPointSettings::showFileExtensions, "showFileExtensions",
+                        StrId::STR_CAT_SYSTEM),
+    SettingInfo::Toggle(StrId::STR_INCLUDE_BETA_UPDATES, &CrossPointSettings::includeBetaUpdates, "includeRcUpdates",
                         StrId::STR_CAT_SYSTEM),
 
     // Will be dealt with separately , so do receive none of the main categories to be visible in the web UI but not the
