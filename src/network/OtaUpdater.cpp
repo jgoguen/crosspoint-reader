@@ -3,8 +3,10 @@
 #include <ArduinoJson.h>
 #include <Logging.h>
 
+#include <cstdio>
 #include <cstring>
 
+#include "CrossPointSettings.h"
 #include "HttpClientStream.h"
 #include "bootloader_common.h"
 #include "esp_flash_partitions.h"
@@ -16,7 +18,8 @@
 #include "esp_wifi.h"
 
 namespace {
-constexpr char latestReleaseUrl[] = "https://api.github.com/repos/jpirnay/crosspoint-reader/releases/latest";
+constexpr char latestReleaseUrl[] = "https://api.github.com/repos/" CROSSPOINT_GIT_REPOSITORY "/releases/latest";
+constexpr char releaseListUrl[] = "https://api.github.com/repos/" CROSSPOINT_GIT_REPOSITORY "/releases?per_page=1";
 constexpr int httpRxBufferSize = 2048;
 constexpr int httpTxBufferSize = 512;
 
@@ -41,6 +44,26 @@ struct HttpClientCleaner {
     }
   }
 };
+
+const char* getReleaseApiUrl() { return SETTINGS.includeBetaUpdates ? releaseListUrl : latestReleaseUrl; }
+
+JsonVariantConst selectRelease(const JsonDocument& doc) {
+  if (doc.is<JsonArrayConst>()) {
+    for (JsonObjectConst release : doc.as<JsonArrayConst>()) {
+      if (release["draft"] | false) {
+        continue;
+      }
+      return release;
+    }
+    return JsonVariantConst();
+  }
+
+  if (doc.is<JsonObjectConst>()) {
+    return doc.as<JsonObjectConst>();
+  }
+
+  return JsonVariantConst();
+}
 } /* namespace */
 
 const char* partitionLabel(const esp_partition_t* partition) {
@@ -81,8 +104,10 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   totalSize = 0;
   render = false;
 
+  const char* releaseApiUrl = getReleaseApiUrl();
+
   esp_http_client_config_t client_config = {
-      .url = latestReleaseUrl,
+      .url = releaseApiUrl,
       .timeout_ms = 10000,
       /* Default HTTP client buffer size 512 byte only */
       .buffer_size = httpRxBufferSize,
@@ -134,10 +159,18 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
           chunked ? "yes" : "no", heap_caps_get_free_size(MALLOC_CAP_8BIT),
           heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
-  filter["tag_name"] = true;
-  filter["assets"][0]["name"] = true;
-  filter["assets"][0]["browser_download_url"] = true;
-  filter["assets"][0]["size"] = true;
+  if (SETTINGS.includeBetaUpdates) {
+    filter[0]["tag_name"] = true;
+    filter[0]["draft"] = true;
+    filter[0]["assets"][0]["name"] = true;
+    filter[0]["assets"][0]["browser_download_url"] = true;
+    filter[0]["assets"][0]["size"] = true;
+  } else {
+    filter["tag_name"] = true;
+    filter["assets"][0]["name"] = true;
+    filter["assets"][0]["browser_download_url"] = true;
+    filter["assets"][0]["size"] = true;
+  }
 
   HttpClientStream responseStream(client_handle, contentLength);
   const DeserializationError error = deserializeJson(doc, responseStream, DeserializationOption::Filter(filter));
@@ -151,21 +184,26 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
     return JSON_PARSE_ERROR;
   }
 
-  if (!doc["tag_name"].is<std::string>()) {
+  const JsonVariantConst release = selectRelease(doc);
+  if (release.isNull()) {
+    LOG_ERR("OTA", "No release found in response");
+    return JSON_PARSE_ERROR;
+  }
+
+  if (!release["tag_name"].is<std::string>()) {
     LOG_ERR("OTA", "No tag_name found");
     return JSON_PARSE_ERROR;
   }
 
-  if (!doc["assets"].is<JsonArray>()) {
+  if (!release["assets"].is<JsonArrayConst>()) {
     LOG_ERR("OTA", "No assets found");
     return JSON_PARSE_ERROR;
   }
 
-  latestVersion = doc["tag_name"].as<std::string>();
+  latestVersion = release["tag_name"].as<std::string>();
 
-  for (JsonObjectConst asset : doc["assets"].as<JsonArrayConst>()) {
-    const char* name = asset["name"] | "";
-    if (strcmp(name, "firmware.bin") == 0) {
+  for (JsonObjectConst asset : release["assets"].as<JsonArrayConst>()) {
+    if (asset["name"] == "firmware.bin") {
       otaUrl = asset["browser_download_url"].as<std::string>();
       otaSize = asset["size"].as<size_t>();
       totalSize = otaSize;
@@ -179,7 +217,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
     return NO_UPDATE;
   }
 
-  LOG_DBG("OTA", "Found update: %s", latestVersion.c_str());
+  LOG_DBG("OTA", "Found %s update: %s", SETTINGS.includeBetaUpdates ? "beta" : "stable", latestVersion.c_str());
   return OK;
 }
 
@@ -188,14 +226,24 @@ bool OtaUpdater::isUpdateNewer() const {
     return false;
   }
 
-  int currentMajor, currentMinor, currentPatch;
-  int latestMajor, latestMinor, latestPatch;
+  int currentMajor = 0, currentMinor = 0, currentPatch = 0, currentBetaRelease = 0, currentBetaBuild = 0;
+  int latestMajor = 0, latestMinor = 0, latestPatch = 0, latestBetaRelease = 0, latestBetaBuild = 0;
 
   const auto currentVersion = CROSSPOINT_VERSION;
+  const bool currentIsBeta = strstr(currentVersion, "-rc.") != nullptr;
+  const bool latestIsBeta = latestVersion.find("-rc.") != std::string::npos;
 
-  // semantic version check (only match on 3 segments)
-  sscanf(latestVersion.c_str(), "%d.%d.%d", &latestMajor, &latestMinor, &latestPatch);
-  sscanf(currentVersion, "%d.%d.%d", &currentMajor, &currentMinor, &currentPatch);
+  // Semantic version check with optional RC suffix. `sscanf()` will stop when
+  // it reaches part of the input string that doesn't match the format, so this
+  // format string works for versions like "1.31", "1.34.2", "1.35.0-rc.1", and
+  // "1.36.0-rc.2.5".
+  // This does not handle versions using the old "rc.<hash>" format, but
+  // considering that people will need to manually install this release or later
+  // to get this functionality anyway that should be fine.
+  sscanf(latestVersion.c_str(), "%d.%d.%d-rc.%d.%d", &latestMajor, &latestMinor, &latestPatch, &latestBetaRelease,
+         &latestBetaBuild);
+  sscanf(currentVersion, "%d.%d.%d-rc.%d.%d", &currentMajor, &currentMinor, &currentPatch, &currentBetaRelease,
+         &currentBetaBuild);
 
   /*
    * Compare major versions.
@@ -216,11 +264,28 @@ bool OtaUpdater::isUpdateNewer() const {
    */
   if (latestPatch != currentPatch) return latestPatch > currentPatch;
 
-  // If we reach here, it means all segments are equal.
-  // One final check, if we're on an RC build (contains "-rc"), we should consider the latest version as newer even if
-  // the segments are equal, since RC builds are pre-release versions.
-  if (strstr(currentVersion, "-rc") != nullptr) {
+  /*
+   * If we reach here, the stable version segments are equal. A stable release
+   * is newer than an RC with the same version.
+   */
+  if (!latestIsBeta && currentIsBeta) {
     return true;
+  }
+
+  if (latestIsBeta && !currentIsBeta) {
+    return false;
+  }
+
+  /*
+   * If both versions are RCs, compare their RC release and build numbers.
+   */
+  if (latestIsBeta && currentIsBeta) {
+    if (latestBetaRelease != currentBetaRelease) {
+      return latestBetaRelease > currentBetaRelease;
+    }
+    if (latestBetaBuild != currentBetaBuild) {
+      return latestBetaBuild > currentBetaBuild;
+    }
   }
 
   return false;
