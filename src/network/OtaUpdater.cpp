@@ -5,6 +5,7 @@
 
 #include "bootloader_common.h"
 #include "esp_flash_partitions.h"
+#include "CrossPointSettings.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_ota_ops.h"
@@ -12,7 +13,8 @@
 #include "esp_wifi.h"
 
 namespace {
-constexpr char latestReleaseUrl[] = "https://api.github.com/repos/jpirnay/crosspoint-reader/releases/latest";
+constexpr char latestReleaseUrl[] = "https://api.github.com/repos/" CROSSPOINT_GIT_REPOSITORY "/releases/latest";
+constexpr char releaseListUrl[] = "https://api.github.com/repos/" CROSSPOINT_GIT_REPOSITORY "/releases?per_page=10";
 
 /* This is buffer and size holder to keep upcoming data from latestReleaseUrl */
 char* local_buf;
@@ -53,6 +55,26 @@ esp_err_t event_handler(esp_http_client_event_t* event) {
 
   return ESP_OK;
 } /* event_handler */
+
+const char* getReleaseApiUrl() { return SETTINGS.includeBetaUpdates ? releaseListUrl : latestReleaseUrl; }
+
+JsonVariantConst selectRelease(const JsonDocument& doc) {
+  if (doc.is<JsonArrayConst>()) {
+    for (JsonObjectConst release : doc.as<JsonArrayConst>()) {
+      if (release["draft"] | false) {
+        continue;
+      }
+      return release;
+    }
+    return JsonVariantConst();
+  }
+
+  if (doc.is<JsonObjectConst>()) {
+    return doc.as<JsonObjectConst>();
+  }
+
+  return JsonVariantConst();
+}
 } /* namespace */
 
 OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
@@ -64,8 +86,18 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   esp_err_t esp_err;
   JsonDocument doc;
 
+  updateAvailable = false;
+  latestVersion.clear();
+  otaUrl.clear();
+  otaSize = 0;
+  processedSize = 0;
+  totalSize = 0;
+  render = false;
+
+  const char* releaseApiUrl = getReleaseApiUrl();
+
   esp_http_client_config_t client_config = {
-      .url = latestReleaseUrl,
+      .url = releaseApiUrl,
       .timeout_ms = 10000,
       .event_handler = event_handler,
       /* Default HTTP client buffer size 512 byte only */
@@ -113,32 +145,46 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
     return INTERNAL_UPDATE_ERROR;
   }
 
-  filter["tag_name"] = true;
-  filter["assets"][0]["name"] = true;
-  filter["assets"][0]["browser_download_url"] = true;
-  filter["assets"][0]["size"] = true;
+  if (SETTINGS.includeBetaUpdates) {
+    filter[0]["tag_name"] = true;
+    filter[0]["draft"] = true;
+    filter[0]["assets"][0]["name"] = true;
+    filter[0]["assets"][0]["browser_download_url"] = true;
+    filter[0]["assets"][0]["size"] = true;
+  } else {
+    filter["tag_name"] = true;
+    filter["assets"][0]["name"] = true;
+    filter["assets"][0]["browser_download_url"] = true;
+    filter["assets"][0]["size"] = true;
+  }
   const DeserializationError error = deserializeJson(doc, local_buf, DeserializationOption::Filter(filter));
   if (error) {
     LOG_ERR("OTA", "JSON parse failed: %s", error.c_str());
     return JSON_PARSE_ERROR;
   }
 
-  if (!doc["tag_name"].is<std::string>()) {
+  const JsonVariantConst release = selectRelease(doc);
+  if (release.isNull()) {
+    LOG_ERR("OTA", "No release found in response");
+    return JSON_PARSE_ERROR;
+  }
+
+  if (!release["tag_name"].is<std::string>()) {
     LOG_ERR("OTA", "No tag_name found");
     return JSON_PARSE_ERROR;
   }
 
-  if (!doc["assets"].is<JsonArray>()) {
+  if (!release["assets"].is<JsonArrayConst>()) {
     LOG_ERR("OTA", "No assets found");
     return JSON_PARSE_ERROR;
   }
 
-  latestVersion = doc["tag_name"].as<std::string>();
+  latestVersion = release["tag_name"].as<std::string>();
 
-  for (int i = 0; i < doc["assets"].size(); i++) {
-    if (doc["assets"][i]["name"] == "firmware.bin") {
-      otaUrl = doc["assets"][i]["browser_download_url"].as<std::string>();
-      otaSize = doc["assets"][i]["size"].as<size_t>();
+  for (JsonObjectConst asset : release["assets"].as<JsonArrayConst>()) {
+    if (asset["name"] == "firmware.bin") {
+      otaUrl = asset["browser_download_url"].as<std::string>();
+      otaSize = asset["size"].as<size_t>();
       totalSize = otaSize;
       updateAvailable = true;
       break;
@@ -150,7 +196,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
     return NO_UPDATE;
   }
 
-  LOG_DBG("OTA", "Found update: %s", latestVersion.c_str());
+  LOG_DBG("OTA", "Found %s update: %s", SETTINGS.includeBetaUpdates ? "beta" : "stable", latestVersion.c_str());
   return OK;
 }
 
