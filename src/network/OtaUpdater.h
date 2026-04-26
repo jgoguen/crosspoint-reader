@@ -3,6 +3,10 @@
 #include <functional>
 #include <string>
 
+#ifndef CROSSPOINT_GIT_REPOSITORY
+#define CROSSPOINT_GIT_REPOSITORY "jpirnay/crosspoint-reader"
+#endif
+
 // Avoid pulling in esp_https_ota.h here — it transitively includes lwip/sockets.h
 // which defines INADDR_NONE as a numeric macro, conflicting with Arduino's IPAddress.h.
 typedef void* esp_https_ota_handle_t;
