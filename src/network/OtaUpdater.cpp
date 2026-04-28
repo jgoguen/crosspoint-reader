@@ -43,6 +43,31 @@ struct HttpClientCleaner {
 };
 } /* namespace */
 
+const char* partitionLabel(const esp_partition_t* partition) {
+  return partition == nullptr ? "<null>" : partition->label;
+}
+
+void logPartitionDescription(const char* context, const esp_partition_t* partition) {
+  if (partition == nullptr) {
+    LOG_ERR("OTA", "%s partition is null", context);
+    return;
+  }
+
+  esp_app_desc_t appDesc;
+  const esp_err_t err = esp_ota_get_partition_description(partition, &appDesc);
+  if (err != ESP_OK) {
+    LOG_ERR("OTA", "%s partition=%s offset=0x%lx size=0x%lx description failed: %s", context, partition->label,
+            static_cast<unsigned long>(partition->address), static_cast<unsigned long>(partition->size),
+            esp_err_to_name(err));
+    return;
+  }
+
+  LOG_ERR("OTA", "%s partition=%s subtype=0x%x offset=0x%lx size=0x%lx app=%s project=%s secure_version=%lu", context,
+          partition->label, partition->subtype, static_cast<unsigned long>(partition->address),
+          static_cast<unsigned long>(partition->size), appDesc.version, appDesc.project_name,
+          static_cast<unsigned long>(appDesc.secure_version));
+}
+
 OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   JsonDocument filter;
   esp_err_t esp_err;
@@ -250,6 +275,13 @@ OtaUpdater::OtaUpdaterError OtaUpdater::beginInstallUpdate() {
   /* For better timing and connectivity, we disable power saving for WiFi */
   esp_wifi_set_ps(WIFI_PS_NONE);
 
+  const esp_partition_t* runningPartition = esp_ota_get_running_partition();
+  const esp_partition_t* nextPartition = esp_ota_get_next_update_partition(nullptr);
+  LOG_ERR("OTA", "OTA begin: version=%s url_size=%lu running=%s next=%s", latestVersion.c_str(),
+          static_cast<unsigned long>(otaSize), partitionLabel(runningPartition), partitionLabel(nextPartition));
+  logPartitionDescription("OTA begin running", runningPartition);
+  logPartitionDescription("OTA begin next", nextPartition);
+
   esp_err_t esp_err = esp_https_ota_begin(&ota_config, &otaHandle);
   if (esp_err != ESP_OK) {
     LOG_DBG("OTA", "HTTP OTA Begin Failed: %s", esp_err_to_name(esp_err));
@@ -280,6 +312,10 @@ int OtaUpdater::forceSetOtaBootPartition() {
     LOG_ERR("OTA", "force boot partition: otadata partition not found");
     return ESP_ERR_NOT_FOUND;
   }
+  LOG_ERR("OTA", "force boot otadata partition=%s offset=0x%lx size=0x%lx erase=%lu", otaDataPartition->label,
+          static_cast<unsigned long>(otaDataPartition->address), static_cast<unsigned long>(otaDataPartition->size),
+          static_cast<unsigned long>(otaDataPartition->erase_size));
+
   esp_ota_select_entry_t otadata[2];
   esp_err_t err = esp_partition_read(otaDataPartition, 0, &otadata[0], sizeof(esp_ota_select_entry_t));
   if (err != ESP_OK) {
@@ -294,6 +330,7 @@ int OtaUpdater::forceSetOtaBootPartition() {
 
   int activeSlot = bootloader_common_get_active_otadata(otadata);
   int nextSlot = (activeSlot == -1) ? 0 : (~activeSlot & 1);
+  LOG_ERR("OTA", "force boot select: active_otadata=%d next_otadata=%d", activeSlot, nextSlot);
 
   uint8_t otaAppCount = 0;
   while (esp_partition_find_first(ESP_PARTITION_TYPE_APP,
@@ -307,6 +344,9 @@ int OtaUpdater::forceSetOtaBootPartition() {
   }
 
   const uint8_t subTypeId = newPartition->subtype & 0x0F;
+  LOG_ERR("OTA", "force boot select: ota_app_count=%u new_partition=%s subtype=0x%x subtype_id=%u", otaAppCount,
+          newPartition->label, newPartition->subtype, subTypeId);
+
   uint32_t newSeq;
   if (activeSlot == -1) {
     newSeq = subTypeId + 1;
@@ -322,9 +362,16 @@ int OtaUpdater::forceSetOtaBootPartition() {
     if (newSeq == currentSeq) newSeq += otaAppCount;
   }
 
+  LOG_ERR("OTA", "force boot select: chosen_seq=%lu maps_seq_mod=%lu maps_bootloader_slot=%lu target_subtype_id=%u",
+          static_cast<unsigned long>(newSeq), static_cast<unsigned long>(newSeq % otaAppCount),
+          static_cast<unsigned long>((newSeq - 1) % otaAppCount), subTypeId);
+
   otadata[nextSlot].ota_seq = newSeq;
   otadata[nextSlot].ota_state = ESP_OTA_IMG_VALID;
   otadata[nextSlot].crc = bootloader_common_ota_select_crc(&otadata[nextSlot]);
+  LOG_ERR("OTA", "force boot after: otadata[%d] seq=%lu state=%lu crc=0x%lx", nextSlot,
+          static_cast<unsigned long>(otadata[nextSlot].ota_seq),
+          static_cast<unsigned long>(otadata[nextSlot].ota_state), static_cast<unsigned long>(otadata[nextSlot].crc));
 
   err = esp_partition_erase_range(otaDataPartition, otaDataPartition->erase_size * static_cast<uint32_t>(nextSlot),
                                   otaDataPartition->erase_size);
@@ -363,6 +410,8 @@ OtaUpdater::OtaUpdaterError OtaUpdater::performInstallUpdateStep() {
 
   if (esp_err != ESP_OK) {
     LOG_ERR("OTA", "esp_https_ota_perform Failed: %s", esp_err_to_name(esp_err));
+    LOG_ERR("OTA", "OTA perform failed after %lu / %lu bytes", static_cast<unsigned long>(processedSize),
+            static_cast<unsigned long>(totalSize));
     cleanupUpdate();
     return HTTP_ERROR;
   }
@@ -373,6 +422,14 @@ OtaUpdater::OtaUpdaterError OtaUpdater::performInstallUpdateStep() {
     return INTERNAL_UPDATE_ERROR;
   }
 
+  const esp_partition_t* runningPartition = esp_ota_get_running_partition();
+  const esp_partition_t* nextPartition = esp_ota_get_next_update_partition(nullptr);
+  LOG_ERR("OTA", "OTA download complete: read=%lu expected=%lu running=%s next=%s",
+          static_cast<unsigned long>(processedSize), static_cast<unsigned long>(totalSize),
+          partitionLabel(runningPartition), partitionLabel(nextPartition));
+  logPartitionDescription("OTA finish running", runningPartition);
+  logPartitionDescription("OTA finish next", nextPartition);
+
   esp_err_t finish_err = esp_https_ota_finish(otaHandle);
   otaHandle = nullptr;
   if (finish_err == ESP_ERR_OTA_VALIDATE_FAILED) {
@@ -380,6 +437,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::performInstallUpdateStep() {
      * is fully written. Force the boot partition to the new OTA slot by writing
      * the otadata entry directly, bypassing image_validate(). */
     LOG_INF("OTA", "Validation failed (expected for unsigned Arduino builds) - forcing boot partition");
+    LOG_ERR("OTA", "esp_https_ota_finish validate failed after complete download: %s", esp_err_to_name(finish_err));
     finish_err = forceSetOtaBootPartition();
     if (finish_err != ESP_OK) {
       LOG_ERR("OTA", "forceSetOtaBootPartition failed: %s", esp_err_to_name(finish_err));
