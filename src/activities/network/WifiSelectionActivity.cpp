@@ -19,6 +19,27 @@
 
 namespace {
 
+const char* wifiStatusToString(const wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS:
+      return "IDLE";
+    case WL_NO_SSID_AVAIL:
+      return "NO_SSID";
+    case WL_SCAN_COMPLETED:
+      return "SCAN_COMPLETED";
+    case WL_CONNECTED:
+      return "CONNECTED";
+    case WL_CONNECT_FAILED:
+      return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST:
+      return "CONNECTION_LOST";
+    case WL_DISCONNECTED:
+      return "DISCONNECTED";
+    default:
+      return "UNKNOWN";
+  }
+}
+
 void readDeviceBaseMac(uint8_t mac[6]) { esp_efuse_mac_get_default(mac); }
 
 std::string formatMacLabel(const uint8_t mac[6]) {
@@ -73,6 +94,10 @@ void WifiSelectionActivity::onEnter() {
   autoCycleCandidates.clear();
   autoCycleCandidateIndex = 0;
   autoCycleAfterScan = false;
+  lastLoggedWifiStatus = WiFi.status();
+
+  LOG_DBG("WIFI", "onEnter status=%s(%d) ip=%s", wifiStatusToString(lastLoggedWifiStatus),
+          static_cast<int>(lastLoggedWifiStatus), WiFi.localIP().toString().c_str());
 
   const std::string persistedMac = formatMacDashed(mac);
   if (WIFI_STORE.getLastKnownMacAddress() != persistedMac) {
@@ -129,6 +154,9 @@ void WifiSelectionActivity::startWifiScan() {
   state = WifiSelectionState::SCANNING;
   networks.clear();
   requestUpdate();
+
+  LOG_DBG("WIFI", "Starting WiFi scan: status=%s(%d) ip=%s", wifiStatusToString(WiFi.status()),
+          static_cast<int>(WiFi.status()), WiFi.localIP().toString().c_str());
 
   // Set WiFi mode to station
   WiFi.mode(WIFI_STA);
@@ -223,11 +251,14 @@ void WifiSelectionActivity::processWifiScanResults() {
   }
 
   if (scanResult == WIFI_SCAN_FAILED) {
+    LOG_ERR("WIFI", "WiFi scan failed");
     autoCycleAfterScan = false;
     state = WifiSelectionState::NETWORK_LIST;
     requestUpdate();
     return;
   }
+
+  LOG_DBG("WIFI", "WiFi scan complete: %d raw result(s)", scanResult);
 
   // Scan complete, process results
   // Use a map to deduplicate networks by SSID, keeping the strongest signal
@@ -279,6 +310,7 @@ void WifiSelectionActivity::processWifiScanResults() {
     return;
   }
 
+  LOG_DBG("WIFI", "WiFi scan processed: %zu unique network(s)", networks.size());
   state = WifiSelectionState::NETWORK_LIST;
   selectedNetworkIndex = 0;
   requestUpdate();
@@ -295,6 +327,9 @@ void WifiSelectionActivity::selectNetwork(const int index) {
   usedSavedPassword = false;
   enteredPassword.clear();
   autoConnecting = false;
+
+  LOG_DBG("WIFI", "Selected network ssid='%s' rssi=%ld encrypted=%d saved=%d", selectedSSID.c_str(),
+          static_cast<long>(network.rssi), network.isEncrypted ? 1 : 0, network.hasSavedPassword ? 1 : 0);
 
   // Check if we have saved credentials for this network
   const auto* savedCred = WIFI_STORE.findCredential(selectedSSID);
@@ -334,6 +369,7 @@ void WifiSelectionActivity::attemptConnection() {
   connectionStartTime = millis();
   connectedIP.clear();
   connectionError.clear();
+  lastLoggedWifiStatus = WL_IDLE_STATUS;
   requestUpdate();
 
   WiFi.persistent(false);  // Credentials are managed by WifiCredentialStore; suppress SDK NVS auto-connect
@@ -347,11 +383,19 @@ void WifiSelectionActivity::attemptConnection() {
   String hostname = "CrossPoint-Reader-" + formatMacCompact(baseMac);
   WiFi.setHostname(hostname.c_str());
 
+  LOG_DBG("WIFI", "Connecting to ssid='%s' auto=%d saved=%d requiresPassword=%d passwordLen=%zu hostname=%s",
+          selectedSSID.c_str(), autoConnecting ? 1 : 0, usedSavedPassword ? 1 : 0, selectedRequiresPassword ? 1 : 0,
+          enteredPassword.size(), hostname.c_str());
+
   if (selectedRequiresPassword && !enteredPassword.empty()) {
     WiFi.begin(selectedSSID.c_str(), enteredPassword.c_str());
   } else {
     WiFi.begin(selectedSSID.c_str());
   }
+
+  const wl_status_t beginStatus = WiFi.status();
+  lastLoggedWifiStatus = beginStatus;
+  LOG_DBG("WIFI", "WiFi.begin issued: status=%s(%d)", wifiStatusToString(beginStatus), static_cast<int>(beginStatus));
 }
 
 bool WifiSelectionActivity::checkCaptivePortal() {
@@ -390,14 +434,31 @@ void WifiSelectionActivity::checkConnectionStatus() {
   }
 
   const wl_status_t status = WiFi.status();
+  if (status != lastLoggedWifiStatus) {
+    LOG_DBG("WIFI", "Status changed: %s(%d) -> %s(%d) elapsed=%lu ip=%s", wifiStatusToString(lastLoggedWifiStatus),
+            static_cast<int>(lastLoggedWifiStatus), wifiStatusToString(status), static_cast<int>(status),
+            static_cast<unsigned long>(millis() - connectionStartTime), WiFi.localIP().toString().c_str());
+    lastLoggedWifiStatus = status;
+  }
 
   if (status == WL_CONNECTED) {
-    // Successfully connected
     IPAddress ip = WiFi.localIP();
+    if (ip == IPAddress(0, 0, 0, 0)) {
+      const unsigned long elapsed = millis() - connectionStartTime;
+      if (elapsed < 2000 || (elapsed % 2000) < 50) {
+        LOG_DBG("WIFI", "Associated but waiting for DHCP/localIP, elapsed=%lu", elapsed);
+      }
+      return;
+    }
+
+    // Successfully connected
     char ipStr[16];
     snprintf(ipStr, sizeof(ipStr), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
     connectedIP = ipStr;
     autoConnecting = false;
+
+    LOG_DBG("WIFI", "Connected to '%s' with ip=%s in %lu ms", selectedSSID.c_str(), connectedIP.c_str(),
+            static_cast<unsigned long>(millis() - connectionStartTime));
 
     // Save this as the last connected network - SD card operations need lock as
     // we use SPI for both
@@ -433,6 +494,8 @@ void WifiSelectionActivity::checkConnectionStatus() {
       state == WifiSelectionState::AUTO_CYCLING ? AUTO_CYCLE_TIMEOUT_MS : CONNECTION_TIMEOUT_MS;
 
   if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
+    LOG_ERR("WIFI", "Connection failed for '%s': status=%s(%d) elapsed=%lu", selectedSSID.c_str(),
+            wifiStatusToString(status), static_cast<int>(status), static_cast<unsigned long>(millis() - connectionStartTime));
     if (state == WifiSelectionState::AUTO_CONNECTING) {
       // Primary SSID failed — scan and try remaining saved credentials
       autoCycleAfterScan = true;
@@ -454,6 +517,9 @@ void WifiSelectionActivity::checkConnectionStatus() {
 
   // Check for timeout
   if (millis() - connectionStartTime > timeout) {
+    LOG_ERR("WIFI", "Connection timeout for '%s' after %lu ms: status=%s(%d) ip=%s", selectedSSID.c_str(),
+            static_cast<unsigned long>(millis() - connectionStartTime), wifiStatusToString(status), static_cast<int>(status),
+            WiFi.localIP().toString().c_str());
     WiFi.disconnect();
     if (state == WifiSelectionState::AUTO_CONNECTING) {
       autoCycleAfterScan = true;
