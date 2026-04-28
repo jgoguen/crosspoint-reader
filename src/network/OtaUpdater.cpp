@@ -3,8 +3,14 @@
 #include <ArduinoJson.h>
 #include <Logging.h>
 
+#include <cstdio>
+#include <cstring>
+
+#include "CrossPointSettings.h"
+#include "HttpClientStream.h"
 #include "bootloader_common.h"
 #include "esp_flash_partitions.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_ota_ops.h"
@@ -12,11 +18,9 @@
 #include "esp_wifi.h"
 
 namespace {
-constexpr char latestReleaseUrl[] = "https://api.github.com/repos/jpirnay/crosspoint-reader/releases/latest";
-
-/* This is buffer and size holder to keep upcoming data from latestReleaseUrl */
-char* local_buf;
-int output_len;
+constexpr char latestReleaseUrl[] = "https://api.github.com/repos/" CROSSPOINT_GIT_REPOSITORY "/releases/latest";
+constexpr char releaseListUrl[] = "https://api.github.com/repos/" CROSSPOINT_GIT_REPOSITORY "/releases?per_page=1";
+constexpr int httpBufferSize = 8192;
 
 /*
  * When esp_crt_bundle.h included, it is pointing wrong header file
@@ -31,114 +35,172 @@ esp_err_t http_client_set_header_cb(esp_http_client_handle_t http_client) {
   return esp_http_client_set_header(http_client, "User-Agent", "CrossPoint-ESP32-" CROSSPOINT_VERSION);
 }
 
-esp_err_t event_handler(esp_http_client_event_t* event) {
-  /* We are only interested in HTTP_EVENT_ON_DATA event */
-  if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
+struct HttpClientCleaner {
+  esp_http_client_handle_t client;
+  ~HttpClientCleaner() {
+    if (client) {
+      esp_http_client_cleanup(client);
+    }
+  }
+};
 
-  if (event->data == nullptr || event->data_len == 0) {
-    return ESP_OK;
+const char* getReleaseApiUrl() { return SETTINGS.includeBetaUpdates ? releaseListUrl : latestReleaseUrl; }
+
+JsonVariantConst selectRelease(const JsonDocument& doc) {
+  if (doc.is<JsonArrayConst>()) {
+    for (JsonObjectConst release : doc.as<JsonArrayConst>()) {
+      if (release["draft"] | false) {
+        continue;
+      }
+      return release;
+    }
+    return JsonVariantConst();
   }
 
-  const int newSize = output_len + event->data_len + 1;
-  char* newBuf = static_cast<char*>(realloc(local_buf, static_cast<size_t>(newSize)));
-  if (newBuf == nullptr) {
-    LOG_ERR("OTA", "HTTP Client Out of Memory Failed, Allocation %d", newSize);
-    return ESP_ERR_NO_MEM;
+  if (doc.is<JsonObjectConst>()) {
+    return doc.as<JsonObjectConst>();
   }
 
-  local_buf = newBuf;
-  memcpy(local_buf + output_len, event->data, event->data_len);
-  output_len += event->data_len;
-  local_buf[output_len] = '\0';
-
-  return ESP_OK;
-} /* event_handler */
+  return JsonVariantConst();
+}
 } /* namespace */
 
-OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
-  // Reset globals so retries start clean regardless of previous outcome
-  local_buf = nullptr;
-  output_len = 0;
+const char* partitionLabel(const esp_partition_t* partition) {
+  return partition == nullptr ? "<null>" : partition->label;
+}
 
+void logPartitionDescription(const char* context, const esp_partition_t* partition) {
+  if (partition == nullptr) {
+    LOG_ERR("OTA", "%s partition is null", context);
+    return;
+  }
+
+  esp_app_desc_t appDesc;
+  const esp_err_t err = esp_ota_get_partition_description(partition, &appDesc);
+  if (err != ESP_OK) {
+    LOG_ERR("OTA", "%s partition=%s offset=0x%lx size=0x%lx description failed: %s", context, partition->label,
+            static_cast<unsigned long>(partition->address), static_cast<unsigned long>(partition->size),
+            esp_err_to_name(err));
+    return;
+  }
+
+  LOG_ERR("OTA", "%s partition=%s subtype=0x%x offset=0x%lx size=0x%lx app=%s project=%s secure_version=%lu", context,
+          partition->label, partition->subtype, static_cast<unsigned long>(partition->address),
+          static_cast<unsigned long>(partition->size), appDesc.version, appDesc.project_name,
+          static_cast<unsigned long>(appDesc.secure_version));
+}
+
+
+OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   JsonDocument filter;
   esp_err_t esp_err;
   JsonDocument doc;
 
+  updateAvailable = false;
+  latestVersion.clear();
+  otaUrl.clear();
+  otaSize = 0;
+  processedSize = 0;
+  totalSize = 0;
+  render = false;
+
+  const char* releaseApiUrl = getReleaseApiUrl();
+
   esp_http_client_config_t client_config = {
-      .url = latestReleaseUrl,
+      .url = releaseApiUrl,
       .timeout_ms = 10000,
-      .event_handler = event_handler,
       /* Default HTTP client buffer size 512 byte only */
-      .buffer_size = 8192,
-      .buffer_size_tx = 8192,
+      .buffer_size = httpBufferSize,
+      .buffer_size_tx = httpBufferSize,
       .crt_bundle_attach = esp_crt_bundle_attach,
       .keep_alive_enable = true,
   };
-
-  /* To track life time of local_buf, dtor will be called on exit from that function */
-  struct localBufCleaner {
-    char** bufPtr;
-    ~localBufCleaner() {
-      if (*bufPtr) {
-        free(*bufPtr);
-        *bufPtr = NULL;
-      }
-    }
-  } localBufCleaner = {&local_buf};
 
   esp_http_client_handle_t client_handle = esp_http_client_init(&client_config);
   if (!client_handle) {
     LOG_ERR("OTA", "HTTP Client Handle Failed");
     return INTERNAL_UPDATE_ERROR;
   }
+  HttpClientCleaner clientCleaner = {client_handle};
 
   esp_err = esp_http_client_set_header(client_handle, "User-Agent", "CrossPoint-ESP32-" CROSSPOINT_VERSION);
   if (esp_err != ESP_OK) {
     LOG_ERR("OTA", "esp_http_client_set_header Failed : %s", esp_err_to_name(esp_err));
-    esp_http_client_cleanup(client_handle);
     return INTERNAL_UPDATE_ERROR;
   }
 
-  esp_err = esp_http_client_perform(client_handle);
+  esp_err = esp_http_client_set_header(client_handle, "Accept", "application/vnd.github+json");
   if (esp_err != ESP_OK) {
-    LOG_ERR("OTA", "esp_http_client_perform Failed : %s", esp_err_to_name(esp_err));
-    esp_http_client_cleanup(client_handle);
+    LOG_ERR("OTA", "esp_http_client_set_header Failed : %s", esp_err_to_name(esp_err));
+    return INTERNAL_UPDATE_ERROR;
+  }
+
+  esp_err = esp_http_client_open(client_handle, 0);
+  if (esp_err != ESP_OK) {
+    LOG_ERR("OTA", "esp_http_client_open Failed : %s", esp_err_to_name(esp_err));
     return HTTP_ERROR;
   }
 
-  /* esp_http_client_close will be called inside cleanup as well*/
-  esp_err = esp_http_client_cleanup(client_handle);
-  if (esp_err != ESP_OK) {
-    LOG_ERR("OTA", "esp_http_client_cleanup Failed : %s", esp_err_to_name(esp_err));
-    return INTERNAL_UPDATE_ERROR;
+  const int64_t headerContentLength = esp_http_client_fetch_headers(client_handle);
+  if (headerContentLength < 0) {
+    LOG_ERR("OTA", "esp_http_client_fetch_headers Failed : %lld", headerContentLength);
+    return HTTP_ERROR;
   }
 
-  filter["tag_name"] = true;
-  filter["assets"][0]["name"] = true;
-  filter["assets"][0]["browser_download_url"] = true;
-  filter["assets"][0]["size"] = true;
-  const DeserializationError error = deserializeJson(doc, local_buf, DeserializationOption::Filter(filter));
+  const int statusCode = esp_http_client_get_status_code(client_handle);
+  if (statusCode != 200) {
+    LOG_ERR("OTA", "Release metadata request failed: HTTP %d", statusCode);
+    return HTTP_ERROR;
+  }
+
+  const bool chunked = esp_http_client_is_chunked_response(client_handle);
+  const int64_t contentLength = chunked ? -1 : esp_http_client_get_content_length(client_handle);
+  LOG_DBG("OTA", "Release metadata headers: content_length=%lld chunked=%s heap=%u largest=%u", contentLength,
+          chunked ? "yes" : "no", heap_caps_get_free_size(MALLOC_CAP_8BIT),
+          heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
+  if (SETTINGS.includeBetaUpdates) {
+    filter[0]["tag_name"] = true;
+    filter[0]["draft"] = true;
+    filter[0]["assets"][0]["name"] = true;
+    filter[0]["assets"][0]["browser_download_url"] = true;
+    filter[0]["assets"][0]["size"] = true;
+  } else {
+    filter["tag_name"] = true;
+    filter["assets"][0]["name"] = true;
+    filter["assets"][0]["browser_download_url"] = true;
+    filter["assets"][0]["size"] = true;
+  }
+
+  HttpClientStream responseStream(client_handle, contentLength);
+  const DeserializationError error = deserializeJson(doc, responseStream, DeserializationOption::Filter(filter));
   if (error) {
-    LOG_ERR("OTA", "JSON parse failed: %s", error.c_str());
+    LOG_ERR("OTA", "JSON parse failed after %zu bytes: %s", responseStream.bytesReadCount(), error.c_str());
     return JSON_PARSE_ERROR;
   }
 
-  if (!doc["tag_name"].is<std::string>()) {
+  const JsonVariantConst release = selectRelease(doc);
+  if (release.isNull()) {
+    LOG_ERR("OTA", "No release found in response");
+    return JSON_PARSE_ERROR;
+  }
+
+  if (!release["tag_name"].is<std::string>()) {
     LOG_ERR("OTA", "No tag_name found");
     return JSON_PARSE_ERROR;
   }
 
-  if (!doc["assets"].is<JsonArray>()) {
+  if (!release["assets"].is<JsonArrayConst>()) {
     LOG_ERR("OTA", "No assets found");
     return JSON_PARSE_ERROR;
   }
 
-  latestVersion = doc["tag_name"].as<std::string>();
+  latestVersion = release["tag_name"].as<std::string>();
 
-  for (int i = 0; i < doc["assets"].size(); i++) {
-    if (doc["assets"][i]["name"] == "firmware.bin") {
-      otaUrl = doc["assets"][i]["browser_download_url"].as<std::string>();
-      otaSize = doc["assets"][i]["size"].as<size_t>();
+  for (JsonObjectConst asset : release["assets"].as<JsonArrayConst>()) {
+    if (asset["name"] == "firmware.bin") {
+      otaUrl = asset["browser_download_url"].as<std::string>();
+      otaSize = asset["size"].as<size_t>();
       totalSize = otaSize;
       updateAvailable = true;
       break;
@@ -150,7 +212,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
     return NO_UPDATE;
   }
 
-  LOG_DBG("OTA", "Found update: %s", latestVersion.c_str());
+  LOG_DBG("OTA", "Found %s update: %s", SETTINGS.includeBetaUpdates ? "beta" : "stable", latestVersion.c_str());
   return OK;
 }
 
@@ -159,14 +221,24 @@ bool OtaUpdater::isUpdateNewer() const {
     return false;
   }
 
-  int currentMajor, currentMinor, currentPatch;
-  int latestMajor, latestMinor, latestPatch;
+  int currentMajor = 0, currentMinor = 0, currentPatch = 0, currentBetaRelease = 0, currentBetaBuild = 0;
+  int latestMajor = 0, latestMinor = 0, latestPatch = 0, latestBetaRelease = 0, latestBetaBuild = 0;
 
   const auto currentVersion = CROSSPOINT_VERSION;
+  const bool currentIsBeta = strstr(currentVersion, "-rc.") != nullptr;
+  const bool latestIsBeta = latestVersion.find("-rc.") != std::string::npos;
 
-  // semantic version check (only match on 3 segments)
-  sscanf(latestVersion.c_str(), "%d.%d.%d", &latestMajor, &latestMinor, &latestPatch);
-  sscanf(currentVersion, "%d.%d.%d", &currentMajor, &currentMinor, &currentPatch);
+  // Semantic version check with optional RC suffix. `sscanf()` will stop when
+  // it reaches part of the input string that doesn't match the format, so this
+  // format string works for versions like "1.31", "1.34.2", "1.35.0-rc.1", and
+  // "1.36.0-rc.2.5".
+  // This does not handle versions using the old "rc.<hash>" format, but
+  // considering that people will need to manually install this release or later
+  // to get this functionality anyway that should be fine.
+  sscanf(latestVersion.c_str(), "%d.%d.%d-rc.%d.%d", &latestMajor, &latestMinor, &latestPatch, &latestBetaRelease,
+         &latestBetaBuild);
+  sscanf(currentVersion, "%d.%d.%d-rc.%d.%d", &currentMajor, &currentMinor, &currentPatch, &currentBetaRelease,
+         &currentBetaBuild);
 
   /*
    * Compare major versions.
@@ -187,11 +259,28 @@ bool OtaUpdater::isUpdateNewer() const {
    */
   if (latestPatch != currentPatch) return latestPatch > currentPatch;
 
-  // If we reach here, it means all segments are equal.
-  // One final check, if we're on an RC build (contains "-rc"), we should consider the latest version as newer even if
-  // the segments are equal, since RC builds are pre-release versions.
-  if (strstr(currentVersion, "-rc") != nullptr) {
+  /*
+   * If we reach here, the stable version segments are equal. A stable release
+   * is newer than an RC with the same version.
+   */
+  if (!latestIsBeta && currentIsBeta) {
     return true;
+  }
+
+  if (latestIsBeta && !currentIsBeta) {
+    return false;
+  }
+
+  /*
+   * If both versions are RCs, compare their RC release and build numbers.
+   */
+  if (latestIsBeta && currentIsBeta) {
+    if (latestBetaRelease != currentBetaRelease) {
+      return latestBetaRelease > currentBetaRelease;
+    }
+    if (latestBetaBuild != currentBetaBuild) {
+      return latestBetaBuild > currentBetaBuild;
+    }
   }
 
   return false;
@@ -246,6 +335,13 @@ OtaUpdater::OtaUpdaterError OtaUpdater::beginInstallUpdate() {
   /* For better timing and connectivity, we disable power saving for WiFi */
   esp_wifi_set_ps(WIFI_PS_NONE);
 
+  const esp_partition_t* runningPartition = esp_ota_get_running_partition();
+  const esp_partition_t* nextPartition = esp_ota_get_next_update_partition(nullptr);
+  LOG_ERR("OTA", "OTA begin: version=%s url_size=%lu running=%s next=%s", latestVersion.c_str(),
+          static_cast<unsigned long>(otaSize), partitionLabel(runningPartition), partitionLabel(nextPartition));
+  logPartitionDescription("OTA begin running", runningPartition);
+  logPartitionDescription("OTA begin next", nextPartition);
+
   esp_err_t esp_err = esp_https_ota_begin(&ota_config, &otaHandle);
   if (esp_err != ESP_OK) {
     LOG_DBG("OTA", "HTTP OTA Begin Failed: %s", esp_err_to_name(esp_err));
@@ -263,23 +359,43 @@ OtaUpdater::OtaUpdaterError OtaUpdater::beginInstallUpdate() {
 int OtaUpdater::forceSetOtaBootPartition() {
   const esp_partition_t* newPartition = esp_ota_get_next_update_partition(nullptr);
   if (newPartition == nullptr) {
+    LOG_ERR("OTA", "force boot partition: next update partition not found");
     return ESP_ERR_NOT_FOUND;
   }
+  logPartitionDescription("force boot next", newPartition);
 
   const esp_partition_t* otaDataPartition =
       esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, nullptr);
   if (otaDataPartition == nullptr) {
+    LOG_ERR("OTA", "force boot partition: otadata partition not found");
     return ESP_ERR_NOT_FOUND;
   }
+  LOG_ERR("OTA", "force boot otadata partition=%s offset=0x%lx size=0x%lx erase=%lu", otaDataPartition->label,
+          static_cast<unsigned long>(otaDataPartition->address), static_cast<unsigned long>(otaDataPartition->size),
+          static_cast<unsigned long>(otaDataPartition->erase_size));
 
   esp_ota_select_entry_t otadata[2];
   esp_err_t err = esp_partition_read(otaDataPartition, 0, &otadata[0], sizeof(esp_ota_select_entry_t));
-  if (err != ESP_OK) return err;
+  if (err != ESP_OK) {
+    LOG_ERR("OTA", "force boot: read otadata[0] failed: %s", esp_err_to_name(err));
+    return err;
+  }
   err = esp_partition_read(otaDataPartition, otaDataPartition->erase_size, &otadata[1], sizeof(esp_ota_select_entry_t));
-  if (err != ESP_OK) return err;
+  if (err != ESP_OK) {
+    LOG_ERR("OTA", "force boot: read otadata[1] failed: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  LOG_ERR("OTA", "force boot before: otadata[0] seq=%lu state=%lu crc=0x%lx",
+          static_cast<unsigned long>(otadata[0].ota_seq), static_cast<unsigned long>(otadata[0].ota_state),
+          static_cast<unsigned long>(otadata[0].crc));
+  LOG_ERR("OTA", "force boot before: otadata[1] seq=%lu state=%lu crc=0x%lx",
+          static_cast<unsigned long>(otadata[1].ota_seq), static_cast<unsigned long>(otadata[1].ota_state),
+          static_cast<unsigned long>(otadata[1].crc));
 
   int activeSlot = bootloader_common_get_active_otadata(otadata);
   int nextSlot = (activeSlot == -1) ? 0 : (~activeSlot & 1);
+  LOG_ERR("OTA", "force boot select: active_otadata=%d next_otadata=%d", activeSlot, nextSlot);
 
   uint8_t otaAppCount = 0;
   while (esp_partition_find_first(ESP_PARTITION_TYPE_APP,
@@ -287,9 +403,15 @@ int OtaUpdater::forceSetOtaBootPartition() {
                                   nullptr) != nullptr) {
     otaAppCount++;
   }
-  if (otaAppCount == 0) return ESP_ERR_NOT_FOUND;
+  if (otaAppCount == 0) {
+    LOG_ERR("OTA", "force boot select: no OTA app partitions found");
+    return ESP_ERR_NOT_FOUND;
+  }
 
   const uint8_t subTypeId = newPartition->subtype & 0x0F;
+  LOG_ERR("OTA", "force boot select: ota_app_count=%u new_partition=%s subtype=0x%x subtype_id=%u", otaAppCount,
+          newPartition->label, newPartition->subtype, subTypeId);
+
   uint32_t newSeq;
   if (activeSlot == -1) {
     newSeq = subTypeId + 1;
@@ -302,16 +424,30 @@ int OtaUpdater::forceSetOtaBootPartition() {
     if (newSeq == currentSeq) newSeq += otaAppCount;
   }
 
+  LOG_ERR("OTA", "force boot select: chosen_seq=%lu maps_seq_mod=%lu maps_bootloader_slot=%lu target_subtype_id=%u",
+          static_cast<unsigned long>(newSeq), static_cast<unsigned long>(newSeq % otaAppCount),
+          static_cast<unsigned long>((newSeq - 1) % otaAppCount), subTypeId);
+
   otadata[nextSlot].ota_seq = newSeq;
   otadata[nextSlot].ota_state = ESP_OTA_IMG_VALID;
   otadata[nextSlot].crc = bootloader_common_ota_select_crc(&otadata[nextSlot]);
+  LOG_ERR("OTA", "force boot after: otadata[%d] seq=%lu state=%lu crc=0x%lx", nextSlot,
+          static_cast<unsigned long>(otadata[nextSlot].ota_seq),
+          static_cast<unsigned long>(otadata[nextSlot].ota_state), static_cast<unsigned long>(otadata[nextSlot].crc));
 
   err = esp_partition_erase_range(otaDataPartition, otaDataPartition->erase_size * static_cast<uint32_t>(nextSlot),
                                   otaDataPartition->erase_size);
-  if (err != ESP_OK) return err;
+  if (err != ESP_OK) {
+    LOG_ERR("OTA", "force boot: erase otadata[%d] failed: %s", nextSlot, esp_err_to_name(err));
+    return err;
+  }
 
-  return esp_partition_write(otaDataPartition, otaDataPartition->erase_size * static_cast<uint32_t>(nextSlot),
-                             &otadata[nextSlot], sizeof(esp_ota_select_entry_t));
+  err = esp_partition_write(otaDataPartition, otaDataPartition->erase_size * static_cast<uint32_t>(nextSlot),
+                            &otadata[nextSlot], sizeof(esp_ota_select_entry_t));
+  if (err != ESP_OK) {
+    LOG_ERR("OTA", "force boot: write otadata[%d] failed: %s", nextSlot, esp_err_to_name(err));
+  }
+  return err;
 }
 
 OtaUpdater::OtaUpdaterError OtaUpdater::performInstallUpdateStep() {
@@ -336,6 +472,8 @@ OtaUpdater::OtaUpdaterError OtaUpdater::performInstallUpdateStep() {
 
   if (esp_err != ESP_OK) {
     LOG_ERR("OTA", "esp_https_ota_perform Failed: %s", esp_err_to_name(esp_err));
+    LOG_ERR("OTA", "OTA perform failed after %lu / %lu bytes", static_cast<unsigned long>(processedSize),
+            static_cast<unsigned long>(totalSize));
     cleanupUpdate();
     return HTTP_ERROR;
   }
@@ -346,6 +484,14 @@ OtaUpdater::OtaUpdaterError OtaUpdater::performInstallUpdateStep() {
     return INTERNAL_UPDATE_ERROR;
   }
 
+  const esp_partition_t* runningPartition = esp_ota_get_running_partition();
+  const esp_partition_t* nextPartition = esp_ota_get_next_update_partition(nullptr);
+  LOG_ERR("OTA", "OTA download complete: read=%lu expected=%lu running=%s next=%s",
+          static_cast<unsigned long>(processedSize), static_cast<unsigned long>(totalSize),
+          partitionLabel(runningPartition), partitionLabel(nextPartition));
+  logPartitionDescription("OTA finish running", runningPartition);
+  logPartitionDescription("OTA finish next", nextPartition);
+
   esp_err_t finish_err = esp_https_ota_finish(otaHandle);
   otaHandle = nullptr;
   if (finish_err == ESP_ERR_OTA_VALIDATE_FAILED) {
@@ -353,6 +499,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::performInstallUpdateStep() {
      * is fully written. Force the boot partition to the new OTA slot by writing
      * the otadata entry directly, bypassing image_validate(). */
     LOG_INF("OTA", "Validation failed (expected for unsigned Arduino builds) - forcing boot partition");
+    LOG_ERR("OTA", "esp_https_ota_finish validate failed after complete download: %s", esp_err_to_name(finish_err));
     finish_err = forceSetOtaBootPartition();
     if (finish_err != ESP_OK) {
       LOG_ERR("OTA", "forceSetOtaBootPartition failed: %s", esp_err_to_name(finish_err));
