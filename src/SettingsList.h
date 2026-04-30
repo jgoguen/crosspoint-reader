@@ -223,6 +223,9 @@ inline const std::vector<SettingInfo> list = {
 #undef BTN_ACT_OPTIONS
 
     // --- System ---
+    SettingInfo::Toggle(StrId::STR_INCLUDE_BETA_UPDATES, &CrossPointSettings::includeBetaUpdates, "includeRcUpdates",
+                        StrId::STR_CAT_SYSTEM)
+        .withSubcategory(StrId::STR_MENU_SYS_SYSTEM),
     SettingInfo::Toggle(StrId::STR_SHOW_HIDDEN_FILES, &CrossPointSettings::showHiddenFiles, "showHiddenFiles",
                         StrId::STR_CAT_SYSTEM),
     SettingInfo::Toggle(StrId::STR_SHOW_FILE_EXTENSIONS, &CrossPointSettings::showFileExtensions, "showFileExtensions",
